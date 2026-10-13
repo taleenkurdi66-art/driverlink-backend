@@ -1,0 +1,19 @@
+.env
+node_modules/
+mobile/node_modules/
+.expo/
+.env
+node_modules/
+mobile/node_modules/
+.expo/
+server.log
+logfile
+server.cjs.backup-*
+
+# Local backups and logs
+*.backup
+*.backup-*
+*.backup*
+*.log
+
+*-backup
