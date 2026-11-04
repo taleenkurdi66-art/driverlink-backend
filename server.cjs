@@ -413,151 +413,118 @@ app.delete('/api/customers/:id', authenticateToken, async (req, res) => {
 });
 
 
+
 app.get('/api/commissions', authenticateToken, async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT
-        c.id,
-        c.trip_id,
-        c.driver_id,
-        u.name AS driver_name,
-        c.fare,
-        c.commission_rate,
-        c.commission_amount,
-        c.driver_amount,
-        c.status,
-        c.created_at
+    const userResult = await pool.query(
+      'SELECT user_type, role FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const user = userResult.rows[0];
+    const isOwner = user.user_type === 'owner' || user.role === 'owner';
+
+    let query = `
+      SELECT c.id, c.trip_id, c.driver_id,
+        u.name AS driver_name, c.fare, c.commission_rate,
+        c.commission_amount, c.driver_amount, c.status, c.created_at
       FROM commissions c
       LEFT JOIN users u ON u.id = c.driver_id
-      ORDER BY c.id DESC
-    `);
+    `;
 
+    const params = [];
+
+    if (!isOwner) {
+      if (user.user_type !== 'driver') {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+      query += ' WHERE c.driver_id = $1';
+      params.push(req.user.id);
+    }
+
+    query += ' ORDER BY c.id DESC';
+
+    const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (error) {
-    console.error(error);
+    console.error('LOAD COMMISSIONS ERROR:', error);
     res.status(500).json({ error: 'Failed to load commissions' });
   }
 });
 
 app.post('/api/commissions', authenticateToken, async (req, res) => {
-  try {
-    const { trip_id, fare, commission_rate = 10 } = req.body;
-
-    if (!trip_id || fare === undefined || fare === null) {
-      return res.status(400).json({ error: 'Trip ID and fare are required' });
-    }
-
-    const fareNumber = Number(fare);
-    const rateNumber = Number(commission_rate);
-
-    if (!Number.isFinite(fareNumber) || fareNumber < 0) {
-      return res.status(400).json({ error: 'Invalid fare' });
-    }
-
-    if (!Number.isFinite(rateNumber) || rateNumber < 0 || rateNumber > 100) {
-      return res.status(400).json({ error: 'Invalid commission rate' });
-    }
-
-    const tripCheck = await pool.query(
-      'SELECT driver_id, status FROM trips WHERE id = $1',
-      [trip_id]
-    );
-
-    if (tripCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Trip not found' });
-    }
-
-    if (tripCheck.rows[0].status !== 'completed') {
-      return res.status(400).json({ error: 'Trip is not completed' });
-    }
-
-    const tripDriverId = tripCheck.rows[0].driver_id;
-    let validDriverId = null;
-
-    if (tripDriverId !== null) {
-      const driverCheck = await pool.query(
-        'SELECT id FROM users WHERE id = $1 AND user_type = $2',
-        [tripDriverId, 'driver']
-      );
-      if (driverCheck.rows.length > 0) {
-        validDriverId = driverCheck.rows[0].id;
-      }
-    }
-
-    const commissionAmount = Math.round(fareNumber * rateNumber) / 100;
-    const driverAmount = fareNumber - commissionAmount;
-
-    const result = await pool.query(
-      `INSERT INTO commissions
-        (trip_id, driver_id, fare, commission_rate, commission_amount, driver_amount)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (trip_id) DO UPDATE SET
-         driver_id = EXCLUDED.driver_id,
-         fare = EXCLUDED.fare,
-         commission_rate = EXCLUDED.commission_rate,
-         commission_amount = EXCLUDED.commission_amount,
-         driver_amount = EXCLUDED.driver_amount
-       RETURNING id, trip_id, driver_id, fare, commission_rate,
-                 commission_amount, driver_amount, status, created_at`,
-      [trip_id, validDriverId, fareNumber, rateNumber, commissionAmount, driverAmount]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (error) {
-    console.error('COMMISSION ERROR:', error.message, error.code, error.constraint);
-    res.status(500).json({ error: error.message, code: error.code });
-  }
+  return res.status(405).json({
+    error: 'Commissions are created automatically when trips are completed'
+  });
 });
 
 app.patch('/api/commissions/:id/status', authenticateToken, async (req, res) => {
   try {
+    const userResult = await pool.query(
+      'SELECT user_type, role FROM users WHERE id = $1',
+      [req.user.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    const user = userResult.rows[0];
+
+    if (user.user_type !== 'owner' && user.role !== 'owner') {
+      return res.status(403).json({
+        error: 'Only the owner can update commission status'
+      });
+    }
+
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!['pending', 'paid', 'cancelled'].includes(status)) {
+    if (!['paid', 'cancelled'].includes(status)) {
       return res.status(400).json({ error: 'Invalid commission status' });
     }
 
     const result = await pool.query(
       `UPDATE commissions
-       SET status=$1
-       WHERE id=$2
+       SET status = $1
+       WHERE id = $2 AND status = 'pending'
        RETURNING id, trip_id, driver_id, fare, commission_rate,
                  commission_amount, driver_amount, status, created_at`,
       [status, id]
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Commission not found' });
+      const existing = await pool.query(
+        'SELECT id, status FROM commissions WHERE id = $1',
+        [id]
+      );
+
+      if (existing.rows.length === 0) {
+        return res.status(404).json({ error: 'Commission not found' });
+      }
+
+      return res.status(409).json({
+        error: 'Only pending commissions can be updated',
+        current_status: existing.rows[0].status
+      });
     }
 
     res.json(result.rows[0]);
   } catch (error) {
-    console.error(error);
+    console.error('UPDATE COMMISSION ERROR:', error);
     res.status(500).json({ error: 'Failed to update commission status' });
   }
 });
 
 app.delete('/api/commissions/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      'DELETE FROM commissions WHERE id=$1 RETURNING id',
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Commission not found' });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to delete commission' });
-  }
+  return res.status(405).json({
+    error: 'Commission records cannot be deleted'
+  });
 });
-
 
 app.post("/api/subscribe", authenticateToken, async (req, res) => {
   try {
