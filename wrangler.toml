@@ -1,0 +1,8 @@
+name = "driverlink-api"
+main = "src/worker.js"
+compatibility_date = "2026-11-07"
+compatibility_flags = ["nodejs_compat"]
+
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "ea34eff83ce1463ea56811165287841c"
